@@ -1,6 +1,15 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+from datetime import datetime
+import numpy as np
 
+import torch 
+if torch.backends.mps.is_available():
+    torch.set_default_dtype(torch.float32)
+
+
+start_time = datetime.now()
+print("Start Time:", start_time)
 from darts import TimeSeries
 from darts.models import (
     ARIMA,
@@ -33,6 +42,7 @@ series = TimeSeries.from_dataframe(
     fill_missing_dates=True,
     freq='MS'
 )
+series=series.astype(np.float32)
 
 # Scale (important for ML/DL models)
 scaler = Scaler()
@@ -49,22 +59,23 @@ start_point = 0.6   # start after 60% of data
 # --------------------------
 models = {
     "ARIMA": ARIMA(),
-    "Prophet": Prophet(),
+    "Prophet": Prophet( ),
     "RandomForest": RandomForest(lags=12),
-    "XGBoost": XGBModel(lags=12),
+    "XGBoost": XGBModel(lags=12,
+        torch_dtype=torch.float32),
     "LightGBM": LightGBMModel(lags=12),
     "LSTM": RNNModel(
         model="LSTM",
         input_chunk_length=12,
         output_chunk_length=forecast_horizon,
         n_epochs=100,
-        random_state=42
+        random_state=42, 
     ),
     "NBEATS": NBEATSModel(
         input_chunk_length=12,
         output_chunk_length=forecast_horizon,
         n_epochs=100,
-        random_state=42
+        random_state=42, 
     )
 }
 
@@ -120,7 +131,7 @@ metrics_df = pd.DataFrame({
     for model in results
 }).T.sort_values("RMSE")
 
-print("\nProfessional Model Comparison:")
+print("\nModel Comparison:")
 print(metrics_df)
 
 # --------------------------
@@ -135,3 +146,11 @@ results[best_model]["forecast"].plot(label=f"{best_model} Forecast")
 plt.legend()
 plt.title("Best Model Rolling Forecast")
 plt.show()
+
+
+end_time = datetime.now()
+print("End Time:", end_time)
+
+# Calculate duration
+duration = end_time - start_time
+print("Duration:", duration)
