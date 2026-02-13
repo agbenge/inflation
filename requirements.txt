@@ -1,1 +1,7 @@
-'u8darts[torch]'
+'u8darts[all]'
+pandas
+scikit-learn
+statsmodels
+prophet
+pmdarima
+openpyxl

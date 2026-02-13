@@ -27,6 +27,16 @@ right_join = pd.merge(inflation, exchange, on=['tyear', 'tmonth'], how='right')
 inner_join = pd.merge(inflation, exchange, on=['tyear', 'tmonth'], how='inner')
 union_join = pd.concat([inflation, exchange], ignore_index=True).drop_duplicates()
 
+# --------------------------
+# Add date column (year-month-01)
+# --------------------------
+for df in [left_join, right_join, inner_join, union_join]:
+    df['date'] = pd.to_datetime(
+        dict(year=df['tyear'], month=df['tmonth'], day=1)
+    )
+
+
+
 # Save all results to one Excel file with multiple sheets
 output_path = "data/combined_join_results.xlsx"
 

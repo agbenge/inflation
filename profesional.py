@@ -13,24 +13,36 @@ from darts.models import (
 )
 from darts.metrics import mae, rmse, mape, smape
 from darts.dataprocessing.transformers import Scaler
-from darts.utils.statistics import backtest_forecasting
 
 # --------------------------
 # 1. Load Data
 # --------------------------
-df = pd.read_excel("data/right_join.xlsx")
-df["date"] = pd.to_datetime(df["date"])
-series = TimeSeries.from_dataframe(df, "date", "inflation")
+df = pd.read_excel("data/inner_join.xlsx")
+# Create proper date column
+df['date'] = pd.to_datetime({
+    'year': df['tyear'],
+    'month': df['tmonth'],
+    'day': 1
+})
+df_unique = df.drop_duplicates(subset=['date'])
+# Convert to TimeSeries, fill missing months
+series = TimeSeries.from_dataframe(
+   df_unique,
+    time_col='date',
+    value_cols='foodAverage',
+    fill_missing_dates=True,
+    freq='MS'
+)
 
-# Scale (important for ML/DL)
+# Scale (important for ML/DL models)
 scaler = Scaler()
 series_scaled = scaler.fit_transform(series)
 
 # --------------------------
-# 2. Define Forecast Settings
+# 2. Forecast Settings
 # --------------------------
-forecast_horizon = 6     # 6 months ahead
-start_point = 0.6        # start backtesting after 60% of data
+forecast_horizon = 6
+start_point = 0.6   # start after 60% of data
 
 # --------------------------
 # 3. Define Models
@@ -59,38 +71,39 @@ models = {
 results = {}
 
 # --------------------------
-# 4. Rolling Backtesting
+# 4. Rolling Backtesting (FIXED)
 # --------------------------
 for name, model in models.items():
     print(f"Backtesting {name}...")
 
     if name in ["ARIMA", "Prophet"]:
-        forecast = backtest_forecasting(
-            model,
+        forecast = model.historical_forecasts(
             series,
             start=start_point,
             forecast_horizon=forecast_horizon,
+            stride=1,
             retrain=True,
             verbose=True
         )
-        actual_series = series.slice_intersect(forecast)
+        actual = series.slice_intersect(forecast)
+
     else:
-        forecast_scaled = backtest_forecasting(
-            model,
+        forecast_scaled = model.historical_forecasts(
             series_scaled,
             start=start_point,
             forecast_horizon=forecast_horizon,
+            stride=1,
             retrain=True,
             verbose=True
         )
         forecast = scaler.inverse_transform(forecast_scaled)
-        actual_series = series.slice_intersect(forecast)
+        actual = series.slice_intersect(forecast)
 
     results[name] = {
-        "MAE": mae(actual_series, forecast),
-        "RMSE": rmse(actual_series, forecast),
-        "MAPE": mape(actual_series, forecast),
-        "sMAPE": smape(actual_series, forecast),
+        "MAE": mae(actual, forecast),
+        "RMSE": rmse(actual, forecast),
+        "MAPE": mape(actual, forecast),
+        "sMAPE": smape(actual, forecast),
         "forecast": forecast
     }
 
@@ -105,9 +118,7 @@ metrics_df = pd.DataFrame({
         "sMAPE": results[model]["sMAPE"]
     }
     for model in results
-}).T
-
-metrics_df = metrics_df.sort_values("RMSE")
+}).T.sort_values("RMSE")
 
 print("\nProfessional Model Comparison:")
 print(metrics_df)
@@ -118,7 +129,7 @@ print(metrics_df)
 best_model = metrics_df.index[0]
 print(f"\nBest Model: {best_model}")
 
-plt.figure(figsize=(12,6))
+plt.figure(figsize=(12, 6))
 series.plot(label="Actual")
 results[best_model]["forecast"].plot(label=f"{best_model} Forecast")
 plt.legend()
