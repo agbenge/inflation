@@ -18,7 +18,7 @@ from darts.utils.statistics import backtest_forecasting
 # --------------------------
 # 1. Load Data
 # --------------------------
-df = pd.read_csv("inflation.csv")
+df = pd.read_excel("data/right_join.xlsx")
 df["date"] = pd.to_datetime(df["date"])
 series = TimeSeries.from_dataframe(df, "date", "inflation")
 
