@@ -1,112 +1,75 @@
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.linear_model import Lasso as SkLasso
 
 from darts import TimeSeries
-from darts.models import (
-    ARIMA,
-    ExponentialSmoothing,
-    Prophet,
-    RandomForest,
-    XGBModel,
-    LightGBMModel,
-    RNNModel,
-    NBEATSModel
-)
-
-from darts.metrics import mae, rmse, mape
+from darts.models import RegressionModel
+from darts.metrics import mae, rmse
 from darts.dataprocessing.transformers import Scaler
 
-# ---------------------------
-# 1. Load Data
-# ---------------------------
-df = pd.read_csv("inflation.csv")
-df["date"] = pd.to_datetime(df["date"])
+# --------------------------
+# 1. Data Prep
+# --------------------------
+# Assuming df is already loaded or read here
+df = pd.read_excel("data/inner_join.xlsx")
+df['date'] = pd.to_datetime({'year': df['tyear'], 'month': df['tmonth'], 'day': 1})
+df_unique = df.drop_duplicates(subset=['date']).sort_values('date')
 
-series = TimeSeries.from_dataframe(df, "date", "inflation")
+series = TimeSeries.from_dataframe(
+   df_unique, time_col='date', value_cols='foodAverage', fill_missing_dates=True, freq='MS'
+).astype(np.float32)
 
-# ---------------------------
-# 2. Train/Test Split
-# ---------------------------
-train, test = series.split_before(0.8)
+ 
 
-# Scale data (important for ML & DL)
 scaler = Scaler()
-train_scaled = scaler.fit_transform(train)
-test_scaled = scaler.transform(test)
+series_scaled = scaler.fit_transform(series)
 
-# ---------------------------
-# 3. Initialize Models
-# ---------------------------
+# --------------------------
+# 2. Updated Model Definitions
+# --------------------------
+lasso_engine = SkLasso(alpha=0.1)
+
 models = {
-    "ARIMA": ARIMA(),
-    "Prophet": Prophet(),
-    "RandomForest": RandomForest(lags=12),
-    "XGBoost": XGBModel(lags=12),
-    "LightGBM": LightGBMModel(lags=12),
-    "LSTM": RNNModel(
-        model="LSTM",
-        input_chunk_length=12,
-        output_chunk_length=6,
-        n_epochs=100,
-        random_state=42
-    ),
-    "NBEATS": NBEATSModel(
-        input_chunk_length=12,
-        output_chunk_length=6,
-        n_epochs=100,
-        random_state=42
-    )
+    "LASSO": RegressionModel(lags=12, model=lasso_engine),
+    ###   period=12  # Note: STLF uses 'period' or 'seasonal_periods' depending on version
+   # )
 }
 
 results = {}
 
-# ---------------------------
-# 4. Train & Predict
-# ---------------------------
+# --------------------------
+# 3. Backtesting Loop
+# --------------------------
 for name, model in models.items():
-    print(f"Training {name}...")
+    print(f"Backtesting {name}...")
     
-    if name in ["ARIMA", "Prophet"]:
-        model.fit(train)
-        forecast = model.predict(len(test))
-    else:
-        model.fit(train_scaled)
-        forecast_scaled = model.predict(len(test))
-        forecast = scaler.inverse_transform(forecast_scaled)
+    # Changed last_points_only to True for easier metric calculation
+    forecast_scaled = model.historical_forecasts(
+        series_scaled,
+        start=0.6,
+        forecast_horizon=6,
+        stride=1,
+        retrain=True,
+        verbose=True,
+        last_points_only=True 
+    )
     
+    # Rescale back to original values
+    forecast = scaler.inverse_transform(forecast_scaled)
+    
+    # Slice the actual series to match the forecast time index
+    actual = series.slice_intersect(forecast)
+
     results[name] = {
-        "forecast": forecast,
-        "MAE": mae(test, forecast),
-        "RMSE": rmse(test, forecast),
-        "MAPE": mape(test, forecast)
+        "MAE": mae(actual, forecast),
+        "RMSE": rmse(actual, forecast),
+        "forecast": forecast
     }
 
-# ---------------------------
-# 5. Print Metrics
-# ---------------------------
-metrics_df = pd.DataFrame({
-    model: {
-        "MAE": results[model]["MAE"],
-        "RMSE": results[model]["RMSE"],
-        "MAPE": results[model]["MAPE"]
-    }
-    for model in results
-}).T
-
+# --------------------------
+# 4. Display Results
+# --------------------------
+metrics_df = pd.DataFrame(results).T.drop(columns='forecast')
 print("\nModel Comparison:")
-print(metrics_df.sort_values("RMSE"))
-
-# ---------------------------
-# 6. Plot Results
-# ---------------------------
-plt.figure(figsize=(12, 6))
-train.plot(label="Train")
-test.plot(label="Actual", linewidth=2)
-
-for name in results:
-    results[name]["forecast"].plot(label=name)
-
-plt.legend()
-plt.title("Inflation Forecast Comparison")
-plt.show()
+print(metrics_df)

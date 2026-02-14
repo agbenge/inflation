@@ -9,6 +9,7 @@ if torch.backends.mps.is_available():
 
 
 start_time = datetime.now()
+results_folder="results"
 print("Start Time:", start_time)
 from darts import TimeSeries
 from darts.models import (
@@ -58,25 +59,31 @@ start_point = 0.6   # start after 60% of data
 # 3. Define Models
 # --------------------------
 models = {
+    # Statistical & Traditional ML (Fast)
     "ARIMA": ARIMA(),
-    "Prophet": Prophet( ),
     "RandomForest": RandomForest(lags=12),
-    "XGBoost": XGBModel(lags=12,
-        torch_dtype=torch.float32),
+    "XGBoost": XGBModel(lags=12, torch_dtype=torch.float32),
     "LightGBM": LightGBMModel(lags=12),
-    "LSTM": RNNModel(
-        model="LSTM",
-        input_chunk_length=12,
-        output_chunk_length=forecast_horizon,
-        n_epochs=100,
-        random_state=42, 
-    ),
-    "NBEATS": NBEATSModel(
-        input_chunk_length=12,
-        output_chunk_length=forecast_horizon,
-        n_epochs=100,
-        random_state=42, 
-    )
+
+    # --- Slower Models (Uncomment to use) ---
+    
+    # "Prophet": Prophet(), # Can be slow due to Bayesian optimization
+    
+    # "LSTM": RNNModel(
+    #     model="LSTM",
+    #     input_chunk_length=12,
+    #     output_chunk_length=forecast_horizon,
+    #     n_epochs=100,  # 100 epochs takes significant time without a GPU
+    #     random_state=42, 
+    # ),
+    
+    # "NBEATS": NBEATSModel(
+    #     input_chunk_length=12,
+    #     output_chunk_length=forecast_horizon,
+    #     n_epochs=100, # Very computationally intensive
+    #     random_state=42, 
+   #)
+
 }
 
 results = {}
@@ -133,24 +140,51 @@ metrics_df = pd.DataFrame({
 
 print("\nModel Comparison:")
 print(metrics_df)
+for model_name in results:
+    plt.figure(figsize=(12, 6))
+    
+    # Plot data
+    series.plot(label="Actual", color="black", lw=1.5)
+    results[model_name]["forecast"].plot(label=f"{model_name} Forecast", alpha=0.8)
+    
+    # Extract metrics for this specific model
+    m_mae = metrics_df.loc[model_name, "MAE"]
+    m_rmse = metrics_df.loc[model_name, "RMSE"]
+    
+    # Create a text string for the metrics box
+    stats_text = f"MAE: {m_mae:.4f}\nRMSE: {m_rmse:.4f}"
+    
+    # Add the text box to the plot
+    plt.gca().text(0.02, 0.95, stats_text, transform=plt.gca().transAxes, 
+                   fontsize=10, verticalalignment='top', 
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.title(f"Forecast: {model_name}")
+    plt.legend(loc='upper right')
+    plt.grid(True, linestyle=':', alpha=0.6)
+    
+    # Save each model's individual graph
+    plt.savefig(f"{results_folder}/{model_name}_forecast.png", dpi=300, bbox_inches='tight')
+    plt.close() 
 
 # --------------------------
-# 6. Plot Best Model
+# 4. Best Model Specific Plot
 # --------------------------
 best_model = metrics_df.index[0]
-print(f"\nBest Model: {best_model}")
-
 plt.figure(figsize=(12, 6))
-series.plot(label="Actual")
-results[best_model]["forecast"].plot(label=f"{best_model} Forecast")
-plt.legend()
-plt.title("Best Model Rolling Forecast")
+
+series.plot(label="Actual", color="gray", alpha=0.5)
+results[best_model]["forecast"].plot(label=f"BEST: {best_model}", color="red", lw=2)
+
+# Add metrics for the best model
+best_stats = (f"BEST MODEL: {best_model}\n"
+              f"RMSE: {metrics_df.loc[best_model, 'RMSE']:.4f}\n"
+              f"MAPE: {metrics_df.loc[best_model, 'MAPE']:.2f}%")
+
+plt.gca().text(0.02, 0.95, best_stats, transform=plt.gca().transAxes, 
+               fontsize=12, fontweight='bold', verticalalignment='top', 
+               bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.3))
+
+plt.title("Winner: Best Model Performance")
+plt.savefig(f"{results_folder}/best_model_comparison.png", dpi=300, bbox_inches='tight')
 plt.show()
-
-
-end_time = datetime.now()
-print("End Time:", end_time)
-
-# Calculate duration
-duration = end_time - start_time
-print("Duration:", duration)
