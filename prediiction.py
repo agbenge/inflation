@@ -1,19 +1,11 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
-import numpy as np
-
-import torch 
-if torch.backends.mps.is_available():
-    torch.set_default_dtype(torch.float32)
-
-
-start_time = datetime.now()
-results_folder="results"
-print("Start Time:", start_time)
+from pathlib import Path
+import torch
 from darts import TimeSeries
-from darts.models import SKLearnModel
-from sklearn.linear_model import Lasso
+from darts.metrics import mae, rmse, mape, smape
+from darts.dataprocessing.transformers import Scaler
 from darts.models import (
     ARIMA,
     Prophet,
@@ -23,166 +15,114 @@ from darts.models import (
     RNNModel,
     NBEATSModel
 )
-from darts.metrics import mae, rmse, mape, smape
-from darts.dataprocessing.transformers import Scaler
 
-# --------------------------
-# 1. Load Data
-# --------------------------
-df = pd.read_excel("data/inner_join.xlsx")
-# Create proper date column
-df['date'] = pd.to_datetime({
-    'year': df['tyear'],
-    'month': df['tmonth'],
-    'day': 1
-})
-df_unique = df.drop_duplicates(subset=['date'])
-# Convert to TimeSeries, fill missing months
-series = TimeSeries.from_dataframe(
-   df_unique,
-    time_col='date',
-    value_cols='foodAverage',
-    fill_missing_dates=True,
-    freq='MS'
-)
 
-# Scale (important for ML/DL models)
-scaler = Scaler()
-series_scaled = scaler.fit_transform(series)
+RESULTS_FOLDER = Path("results")
+RESULTS_FOLDER.mkdir(exist_ok=True)
 
-# --------------------------
-# 2. Forecast Settings
-# --------------------------
-forecast_horizon = 6
-start_point = 0.6  # start after 60% of data
+def process_case(file_path):
+    
+    if torch.backends.mps.is_available():
+        torch.set_default_dtype(torch.float32)
+    print(f"\n--- Processing: {file_path.name} ---")
+    
+    df = pd.read_excel(file_path)
+    df['date'] = pd.to_datetime({'year': df['tyear'], 'month': df['tmonth'], 'day': 1})
+    df = df.sort_values('date').drop_duplicates(subset=['date'])
 
-# --------------------------
-# 3. Define Models
-# --------------------------
-models = {
-    # "ARIMA": ARIMA(),
-#     "LASSO":  SKLearnModel(
-#     lags=12,
-#     model=Lasso(alpha=0.1)
-# ),
-    # "Prophet": Prophet(changepoint_prior_scale=0.15, yearly_seasonality=4, seasonality_mode="additive"),
+    target_col = 'allItemsYearOn'
+    exclude_cols = ['date', target_col, 'tyear', 'tmonth', 'tday', 'index']
+    feature_cols = [col for col in df.columns if col not in exclude_cols]
+
+    target_series = TimeSeries.from_dataframe(df, 'date', target_col, fill_missing_dates=True, freq='MS')
+    
+    cov_series = None
+    if feature_cols:
+        cov_series = TimeSeries.from_dataframe(df, 'date', feature_cols, fill_missing_dates=True, freq='MS')
+
+    scaler_target = Scaler()
+    target_scaled = scaler_target.fit_transform(target_series)
+    
+    cov_scaled = None
+    if cov_series:
+        scaler_cov = Scaler()
+        cov_scaled = scaler_cov.fit_transform(cov_series)
+
+    forecast_horizon = 6
+    start_point = 0.7 
+
+    models = {
+        "ARIMA": ARIMA(),
+        "Prophet": Prophet(),
+        "RandomForest": RandomForestModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1, n_estimators=100),
+        "XGBoost": XGBModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
+        "LightGBM": LightGBMModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
+        "LSTM": RNNModel(model="LSTM", input_chunk_length=12, output_chunk_length=forecast_horizon, n_epochs=50, random_state=42),
+        "NBEATS": NBEATSModel(input_chunk_length=12, output_chunk_length=forecast_horizon, n_epochs=50, random_state=42)
+    }
+
+    results = {}
+
+    for name, model in models.items():
+        print(f"   Training {name}...")
+        
+        # Logic for models that use Covariates vs Univariate
+        kwargs = {}
+        if name not in ["ARIMA", "Prophet"] and cov_scaled:
+            kwargs['past_covariates'] = cov_scaled
+
+        try:
+            forecast_scaled = model.historical_forecasts(
+                target_scaled,
+                start=start_point,
+                forecast_horizon=forecast_horizon,
+                stride=1,
+                retrain=True,
+                verbose=False,
+                **kwargs
+            )
+            
+            forecast = scaler_target.inverse_transform(forecast_scaled)
+            actual = target_series.slice_intersect(forecast)
+
+            results[name] = {
+                "MAE": mae(actual, forecast),
+                "RMSE": rmse(actual, forecast),
+                "MAPE": mape(actual, forecast),
+                "forecast": forecast
+            }
+        except Exception as e:
+            print(f"      Error with {name}: {e}")
+
+    # Metrics Summary
+    metrics_df = pd.DataFrame({m: {k: v for k, v in results[m].items() if k != 'forecast'} for m in results}).T.sort_values("RMSE")
+   
+
+    # Plotting loop
+    for model_name, data in results.items():
+        plt.figure(figsize=(12, 6))
+        target_series.plot(label="Actual", color="black")
+        data["forecast"].plot(label=f"{model_name} Forecast")
+        plt.title(f"{file_path.stem} - {model_name}")
+        plt.savefig(RESULTS_FOLDER / f"{file_path.stem}_{model_name}.png")
+        plt.close()
+
      
-    #  "RandomForest": RandomForestModel(lags=12,
-    # n_estimators=300,
-    # max_depth=8,
-    # min_samples_split=3,
-    # min_samples_leaf=2,
-    # max_features=0.8,
-    # output_chunk_length=1,
-    # bootstrap=True,
-    # random_state=42,
-    # n_jobs=-1),
-    # "XGBoost": XGBModel( lags=12,
-    # output_chunk_length=1,
-    # n_estimators=300,
-    # max_depth=5,
-    # learning_rate=0.05,
-    # subsample=0.8,
-    # colsample_bytree=0.8,
-    # gamma=0.1,
-    # min_child_weight=3,
-    # reg_alpha=0.1,
-    # reg_lambda=1.0,
-    # objective='reg:squarederror',
-    # random_state=42,
-    # n_jobs=-1),
-   "LightGBM": LightGBMModel(
-    lags=12,
-    output_chunk_length=1,
-    n_estimators=300,
-    max_depth=6,
-    num_leaves=25,
-    learning_rate=0.05,
-    min_child_samples=20,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.1,
-    reg_lambda=0.1,
-    random_state=42,
-    n_jobs=-1
-)
-    # "LSTM": RNNModel(
-    #     model="LSTM",
-    #     input_chunk_length=12,
-    #     output_chunk_length=forecast_horizon,
-    #     n_epochs=100,
-    #     random_state=42
-    # ),
-    # "NBEATS": NBEATSModel(
-    #     input_chunk_length=12,
-    #     output_chunk_length=forecast_horizon,
-    #     n_epochs=100,
-    #     random_state=42
-    # )
-}
+ 
+    # --------------------------
+    # 5. Compare Metrics
+    # --------------------------
+    metrics_df = pd.DataFrame({
+        model: { 
+            "RMSE": results[model]["RMSE"],
+            "MAE": results[model]["MAE"],
+            "MAPE": results[model]["MAPE"], 
+        }
+        for model in results
+    }).T.sort_values("RMSE")
 
-results = {}
+    print("\nModel Comparison:")
+    print(metrics_df)
 
-# --------------------------
-# 4. Rolling Backtesting (FIXED)
-# --------------------------
-for name, model in models.items(): 
-    if name in ["ARIMA", "Prophet"]:
-        forecast = model.historical_forecasts(
-            series,
-            start=start_point,
-            forecast_horizon=forecast_horizon,
-            stride=1,
-            retrain=True,
-            verbose=True
-        )
-        actual = series.slice_intersect(forecast)
 
-    else:
-        forecast_scaled = model.historical_forecasts(
-            series_scaled,
-            start=start_point,
-            forecast_horizon=forecast_horizon,
-            stride=1,
-            retrain=True,
-            verbose=True
-        )
-        forecast = scaler.inverse_transform(forecast_scaled)
-        actual = series.slice_intersect(forecast)
-
-    results[name] = {
-        "MAE": mae(actual, forecast),
-        "RMSE": rmse(actual, forecast),
-        "MAPE": mape(actual, forecast),
-        "sMAPE": smape(actual, forecast),
-        "forecast": forecast
-    }
-
-# --------------------------
-# 5. Compare Metrics
-# --------------------------
-metrics_df = pd.DataFrame({
-    model: {
-        "MAE": results[model]["MAE"],
-        "RMSE": results[model]["RMSE"],
-        "MAPE": results[model]["MAPE"],
-        "sMAPE": results[model]["sMAPE"]
-    }
-    for model in results
-}).T.sort_values("RMSE")
-
-print("\nProfessional Model Comparison:")
-print(metrics_df)
-
-# --------------------------
-# 6. Plot Best Model
-# --------------------------
-best_model = metrics_df.index[0]
-print(f"\nBest Model: {best_model}")
-
-# plt.figure(figsize=(12, 6))
-# series.plot(label="Actual")
-# results[best_model]["forecast"].plot(label=f"{best_model} Forecast")
-# plt.legend()
-# plt.title("Best Model Rolling Forecast")
-# plt.show()
+       
