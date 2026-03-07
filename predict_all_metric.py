@@ -1,88 +1,79 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
 from pathlib import Path
 from sklearn.linear_model import Lasso
-import torch
 from darts import TimeSeries
-from darts.metrics import mae, rmse, mape, smape
+from darts.metrics import mae, rmse, mape
 from darts.dataprocessing.transformers import Scaler
-from darts.models import (
-    ARIMA,
-    Prophet,
-    RandomForestModel,
-    SKLearnModel,
-    XGBModel,
-    LightGBMModel,
-    RNNModel,
-    NBEATSModel
-)
+from darts.models import RandomForestModel, SKLearnModel
+
 import pandas as pd
 from pathlib import Path
 
 import torch
 if torch.backends.mps.is_available():
         torch.set_default_dtype(torch.float32) 
-        
 RESULTS_FOLDER = Path("results")
 RESULTS_FOLDER.mkdir(exist_ok=True)
 
 def process_case(file_path):
-    
-    
     print(f"\n--- Processing: {file_path.name} ---")
     
+    # 1. Load and Clean Data
     df = pd.read_excel(file_path)
     df['date'] = pd.to_datetime({'year': df['tyear'], 'month': df['tmonth'], 'day': 1})
     df.drop(columns=['tyear', 'tmonth'], inplace=True)
     df = df.sort_values('date').drop_duplicates(subset=['date'])
 
     target_col = 'allItemsYearOn'
-    exclude_cols = ['date', target_col, 'tyear', 'tmonth', 'tday', 'index']
+    exclude_cols = ['date', target_col, 'tday', 'index'] # Removed 'tyear', 'tmonth' as they are already dropped
     feature_cols = [col for col in df.columns if col not in exclude_cols] 
 
+    # 2. Convert to TimeSeries
     target_series = TimeSeries.from_dataframe(df, 'date', target_col, fill_missing_dates=True, freq='MS')
     
     cov_series = None
     if feature_cols:
         cov_series = TimeSeries.from_dataframe(df, 'date', feature_cols, fill_missing_dates=True, freq='MS')
 
+    # 3. PREVENT DATA LEAKAGE: Fit Scalers ONLY on training data
+    start_point = 0.7 
+    train_target, _ = target_series.split_before(start_point)
+    
     scaler_target = Scaler()
-    target_scaled = scaler_target.fit_transform(target_series)
+    scaler_target.fit(train_target) # Fit only on train
+    target_scaled = scaler_target.transform(target_series) # Transform everything
     
     cov_scaled = None
     if cov_series:
+        train_cov, _ = cov_series.split_before(start_point)
         scaler_cov = Scaler()
-        cov_scaled = scaler_cov.fit_transform(cov_series)
+        scaler_cov.fit(train_cov) # Fit only on train
+        cov_scaled = scaler_cov.transform(cov_series)
 
-    forecast_horizon = 1
-    start_point = 0.7 
+    forecast_horizon = 6
 
+    # 4. Define Models
     models = {
-        "LASSO":  SKLearnModel(
-    lags=12,
-    lags_past_covariates=12 if cov_scaled else None,
-    model=Lasso(alpha=0.01)
-),
-        # "ARIMA": ARIMA(),
-        # "Prophet": Prophet(),
-        "RandomForest":
-            RandomForestModel(lags=12, 
-                                          lags_past_covariates=12 if cov_scaled else None,
-                                          output_chunk_length=1, 
-                                          n_estimators=100),
-        # "XGBoost": XGBModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
-#   "LightGBM": LightGBMModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
-        # "LSTM": RNNModel(model="LSTM", input_chunk_length=12, output_chunk_length=forecast_horizon, n_epochs=50, random_state=42),
-        # "NBEATS": NBEATSModel(input_chunk_length=12, output_chunk_length=forecast_horizon, n_epochs=50, random_state=42)
+        "LASSO": SKLearnModel(
+            lags=12,
+            lags_past_covariates=12 if cov_scaled else None,
+            model=Lasso(alpha=0.01)
+        ),
+        "RandomForest": RandomForestModel(
+            lags=12, 
+            lags_past_covariates=12 if cov_scaled else None, 
+            output_chunk_length=1, 
+            n_estimators=100
+        )
     }
 
     results = {}
 
+    # 5. Run Historical Forecasts
     for name, model in models.items():
         print(f"   Training {name}...")
         
-        # Logic for models that use Covariates vs Univariate
         kwargs = {}
         if name not in ["ARIMA", "Prophet"] and cov_scaled:
             kwargs['past_covariates'] = cov_scaled
@@ -93,12 +84,13 @@ def process_case(file_path):
                 start=start_point,
                 forecast_horizon=forecast_horizon,
                 stride=1,
-                retrain=True,
+                retrain=True, # Note: Consider setting to an int (e.g., 6) if using heavy models later
                 verbose=False,
                 show_warnings=False,
                 **kwargs
             )
             
+            # Inverse transform to get actual inflation numbers back
             forecast = scaler_target.inverse_transform(forecast_scaled)
             actual = target_series.slice_intersect(forecast)
 
@@ -111,11 +103,11 @@ def process_case(file_path):
         except Exception as e:
             print(f"      Error with {name}: {e}")
 
-    # Metrics Summary
-    metrics_df = pd.DataFrame({m: {k: v for k, v in results[m].items() if k != 'forecast'} for m in results}).T.sort_values("RMSE")
-   
+    if not results:
+        print("No models completed successfully.")
+        return pd.DataFrame()
 
-    # Plotting loop
+    # 6. Plotting loop
     for model_name, data in results.items():
         plt.figure(figsize=(12, 6))
         target_series.plot(label="Actual", color="black")
@@ -123,25 +115,21 @@ def process_case(file_path):
         plt.title(f"{file_path.stem} - {model_name}")
         plt.savefig(RESULTS_FOLDER / f"{file_path.stem}_{model_name}.png")
         plt.close()
-
-     
  
-    # --------------------------
-    # 5. Compare Metrics
-    # --------------------------
+    # 7. Consolidate and Compare Metrics
     metrics_df = pd.DataFrame({
         model: { 
             "RMSE": results[model]["RMSE"],
-            # "MAE": results[model]["MAE"],
-            # "MAPE": results[model]["MAPE"], 
+            "MAE": results[model]["MAE"],
+            "MAPE": results[model]["MAPE"], 
         }
         for model in results
     }).T.sort_values("RMSE")
 
     print("\nModel Comparison:")
     print(metrics_df)
+    
     return metrics_df
-
 
 
 def process_excel_files(folder_path):
@@ -175,7 +163,3 @@ def process_excel_files(folder_path):
 
 folder_to_scan = 'data/manual_clean' 
 process_excel_files(folder_to_scan)
-
-
-
-       
