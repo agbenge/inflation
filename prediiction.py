@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
-from sklearn.linear_model import Lasso
+from sklearn.linear_model import Lasso, Ridge
 import torch
 from darts import TimeSeries
 from darts.metrics import mae, rmse, mape, smape
@@ -55,23 +55,27 @@ def process_case(file_path):
         scaler_cov = Scaler()
         cov_scaled = scaler_cov.fit_transform(cov_series)
 
-    forecast_horizon = 1
+    forecast_horizon = 6
     start_point = 0.7 
 
     models = {
-        "LASSO":  SKLearnModel(
-    lags=12,
-    lags_past_covariates=12 if cov_scaled else None,
-    model=Lasso(alpha=0.01)
-),
+#         "LASSO":  SKLearnModel(
+#     lags=12,
+#     lags_past_covariates=12 if cov_scaled else None,
+#     model=Lasso(alpha=0.01)
+# ),
         # "ARIMA": ARIMA(),
         # "Prophet": Prophet(),
-        "RandomForest":
-            RandomForestModel(lags=12, 
-                                          lags_past_covariates=12 if cov_scaled else None,
-                                          output_chunk_length=1, 
-                                          n_estimators=100),
-        # "XGBoost": XGBModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
+        # "RandomForest":
+        #     RandomForestModel(lags=12, 
+        #                                   lags_past_covariates=12 if cov_scaled else None,
+        #                                   output_chunk_length=1, 
+        #                                   n_estimators=100),
+        "XGBoost": XGBModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
+        "Ridge":  SKLearnModel(
+            lags=12,
+            lags_past_covariates=12 if cov_scaled else None,
+            model=Ridge(alpha=0.01) ),
 #   "LightGBM": LightGBMModel(lags=12, lags_past_covariates=12 if cov_scaled else None, output_chunk_length=1),
         # "LSTM": RNNModel(model="LSTM", input_chunk_length=12, output_chunk_length=forecast_horizon, n_epochs=50, random_state=42),
         # "NBEATS": NBEATSModel(input_chunk_length=12, output_chunk_length=forecast_horizon, n_epochs=50, random_state=42)
